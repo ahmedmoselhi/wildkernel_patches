@@ -1,0 +1,306 @@
+diff -ruN old/apk_sign.c new/apk_sign.c
+--- old/apk_sign.c	2025-09-28 20:47:03.914738400 +0200
++++ new/apk_sign.c	2025-09-28 21:18:13.455524300 +0200
+@@ -317,7 +317,9 @@ module_param_cb(ksu_debug_manager_uid, &expected_size_ops,
+ 
+ #endif
+ 
+-bool ksu_is_manager_apk(char *path) { int tries = 0;
++bool is_manager_apk(char *path)
++{
++	int tries = 0;
+ 
+ 	while (tries++ < 10) {
+ 		if (!is_lock_held(path))
+@@ -337,10 +339,5 @@ bool ksu_is_manager_apk(char *path) { int tries = 0;
+ 	pr_info("%s: expected size: %u, expected hash: %s\n",
+ 		path, expected_manager_size, expected_manager_hash);
+ 
+-#ifdef CONFIG_KSU_SUSFS
+-	return (check_v2_signature(path, expected_manager_size, expected_manager_hash) || check_v2_signature(path, 384, "79e590113c4c4c0c222978e413a5faa801666957b1212a328e46c00c69821bf7")); // 5ec1cff
+-
+-#else
+- 	return check_v2_signature(path, expected_manager_size, expected_manager_hash);
+-#endif
++	return check_v2_signature(path, expected_manager_size, expected_manager_hash);
+ }
+diff -ruN old/core_hook.c new/core_hook.c
+--- old/core_hook.c	2025-09-28 20:47:04.413147900 +0200
++++ new/core_hook.c	2025-09-28 21:32:49.904232800 +0200
+@@ -649,35 +649,12 @@ static void try_umount(const char *mnt, bool check_mnt, int flags)
+ 		return;
+ 	}
+ 
+-#if defined(CONFIG_KSU_SUSFS_TRY_UMOUNT) && defined(CONFIG_KSU_SUSFS_ENABLE_LOG)
+-	if (susfs_is_log_enabled) {
+-		pr_info("susfs: umounting '%s' for uid: %d\n", mnt, uid);
+-	}
+-#endif
+-
+ 	err = ksu_umount_mnt(&path, flags);
+ 	if (err) {
+ 		pr_warn("umount %s failed: %d\n", mnt, err);
+ 	}
+ }
+ 
+-#ifdef CONFIG_KSU_SUSFS_TRY_UMOUNT
+-void susfs_try_umount_all(uid_t uid) {
+-	susfs_try_umount(uid);
+-	/* For Legacy KSU only */
+-	ksu_try_umount("/system", true, 0, uid);
+-	ksu_try_umount("/system_ext", true, 0, uid);
+-	ksu_try_umount("/vendor", true, 0, uid);
+-	ksu_try_umount("/product", true, 0, uid);
+-	ksu_try_umount("/odm", true, 0, uid);
+-	// - For '/data/adb/modules' we pass 'false' here because it is a loop device that we can't determine whether 
+-	//   its dev_name is KSU or not, and it is safe to just umount it if it is really a mountpoint
+-	ksu_try_umount("/data/adb/modules", false, MNT_DETACH, uid);
+-	/* For both Legacy KSU and Magic Mount KSU */
+-	ksu_try_umount("/debug_ramdisk", true, MNT_DETACH, uid);
+-}
+-#endif
+-
+ int ksu_handle_setuid(struct cred *new, const struct cred *old)
+ {
+ 	// this hook is used for umounting overlayfs for some uid, if there isn't any module mounted, just ignore it!
+@@ -742,31 +719,25 @@ do_umount:
+ 		current->pid);
+ #endif
+ 
+-#ifdef CONFIG_KSU_SUSFS_TRY_UMOUNT
+-out_susfs_try_umount_all:
+-	// susfs come first, and lastly umount by ksu, make sure umount in reversed order
+-	susfs_try_umount_all(new_uid.val);
+-#else
+ 	// fixme: use `collect_mounts` and `iterate_mount` to iterate all mountpoint and
+ 	// filter the mountpoint whose target is `/data/adb`
+-	ksu_try_umount("/odm", true, 0);
+-	ksu_try_umount("/system", true, 0);
+-	ksu_try_umount("/system_ext", true, 0);
+-	ksu_try_umount("/vendor", true, 0);
+-	ksu_try_umount("/product", true, 0);
+-	ksu_try_umount("/data/adb/modules", false, MNT_DETACH);
++	try_umount("/odm", true, 0);
++	try_umount("/system", true, 0);
++	try_umount("/system_ext", true, 0);
++	try_umount("/vendor", true, 0);
++	try_umount("/product", true, 0);
++	try_umount("/data/adb/modules", false, MNT_DETACH);
+ 
+ 	// try umount ksu temp path
+-	ksu_try_umount("/debug_ramdisk", false, MNT_DETACH);
+-	ksu_try_umount("/sbin", false, MNT_DETACH);
++	try_umount("/debug_ramdisk", false, MNT_DETACH);
++	try_umount("/sbin", false, MNT_DETACH);
+ 
+ 	// try umount hosts file
+-	ksu_try_umount("/system/etc/hosts", false, MNT_DETACH);
++	try_umount("/system/etc/hosts", false, MNT_DETACH);
+ 
+ 	// try umount lsposed dex2oat bins
+-	ksu_try_umount("/apex/com.android.art/bin/dex2oat64", false, MNT_DETACH);
+-	ksu_try_umount("/apex/com.android.art/bin/dex2oat32", false, MNT_DETACH);
+-#endif
++	try_umount("/apex/com.android.art/bin/dex2oat64", false, MNT_DETACH);
++	try_umount("/apex/com.android.art/bin/dex2oat32", false, MNT_DETACH);
+ 
+ 	return 0;
+ }
+diff -ruN old/ksud.c new/ksud.c
+--- old/ksud.c	2025-09-28 20:47:04.413147900 +0200
++++ new/ksud.c	2025-09-28 22:47:40.156047000 +0200
+@@ -64,25 +64,21 @@ bool ksu_execveat_hook __read_mostly = true;
+ bool ksu_input_hook __read_mostly = true;
+ #endif
+ 
+-#ifdef CONFIG_KSU_SUSFS_SUS_SU
+-bool susfs_is_sus_su_ready = false;
+-#endif // #ifdef CONFIG_KSU_SUSFS_SUS_SU
+-
+ u32 ksu_devpts_sid;
+ 
+ #ifdef CONFIG_COMPAT
+ bool ksu_is_compat __read_mostly = false;
+ #endif
+ 
+-void ksu_on_post_fs_data(void)
++void on_post_fs_data(void)
+ {
+ 	static bool done = false;
+ 	if (done) {
+-		pr_info("ksu_on_post_fs_data already done\n");
++		pr_info("on_post_fs_data already done\n");
+ 		return;
+ 	}
+ 	done = true;
+-	pr_info("ksu_on_post_fs_data!\n");
++	pr_info("on_post_fs_data!\n");
+ 	ksu_load_allow_list();
+ 	// sanity check, this may influence the performance
+ 	stop_input_hook();
+diff -ruN old/selinux/rules.c new/selinux/rules.c
+--- old/selinux/rules.c	2025-09-28 20:47:04.413147900 +0200
++++ new/selinux/rules.c	2025-09-28 20:59:07.847769800 +0200
+@@ -38,11 +38,11 @@ static struct policydb *get_policydb(void)
+ 
+ static DEFINE_MUTEX(ksu_rules);
+ 
+-void ksu_apply_kernelsu_rules()
++void apply_kernelsu_rules()
+ {
+ 	struct policydb *db;
+ 
+-	if (!ksu_getenforce()) {
++	if (!getenforce()) {
+ 		pr_info("SELinux permissive or disabled, apply rules!\n");
+ 	}
+ 
+@@ -139,14 +139,6 @@ void ksu_apply_kernelsu_rules()
+ 	ksu_allow(db, "system_server", KERNEL_SU_DOMAIN, "process", "getpgid");
+ 	ksu_allow(db, "system_server", KERNEL_SU_DOMAIN, "process", "sigkill");
+ 
+-#ifdef CONFIG_KSU_SUSFS
+-	// Allow umount in zygote process without installing zygisk
+-	ksu_allow(db, "zygote", "labeledfs", "filesystem", "unmount");
+-	susfs_set_init_sid();
+-	susfs_set_ksu_sid();
+-	susfs_set_zygote_sid();
+-#endif
+-
+ 	mutex_unlock(&ksu_rules);
+ }
+ 
+diff -ruN old/selinux/selinux.c new/selinux/selinux.c
+--- old/selinux/selinux.c	2025-09-28 20:47:04.413147900 +0200
++++ new/selinux/selinux.c	2025-09-28 21:11:46.895909900 +0200
+@@ -52,7 +52,7 @@ if (!is_domain_permissive) {
+ }*/
+ }
+ 
+-void ksu_setenforce(bool enforce)
++void setenforce(bool enforce)
+ {
+ #ifdef CONFIG_SECURITY_SELINUX_DEVELOP
+ #ifdef KSU_COMPAT_USE_SELINUX_STATE
+@@ -63,7 +63,7 @@ void ksu_setenforce(bool enforce)
+ #endif
+ }
+ 
+-bool ksu_getenforce()
++bool getenforce()
+ {
+ #ifdef CONFIG_SECURITY_SELINUX_DISABLE
+ #ifdef KSU_COMPAT_USE_SELINUX_STATE
+diff -ruN old/sucompat.c new/sucompat.c
+--- old/sucompat.c	2025-09-28 22:04:15.828169400 +0200
++++ new/sucompat.c	2025-09-28 22:44:10.722175700 +0200
+@@ -13,9 +13,7 @@
+ #else
+ #include <linux/sched.h>
+ #endif
+-#ifdef CONFIG_KSU_SUSFS_SUS_SU
+-#include <linux/susfs_def.h>
+-#endif
++
+ #include "objsec.h"
+ #include "allowlist.h"
+ #include "arch.h"
+@@ -41,36 +39,37 @@ static void __user *userspace_stack_buffer(const void *d, size_t len)
+ 	return copy_to_user(p, d, len) ? NULL : p;
+ }
+ 
+-static inline char __user *sh_user_path(void)
++static char __user *sh_user_path(void)
+ {
++	static const char sh_path[] = "/system/bin/sh";
++
+ 	return userspace_stack_buffer(sh_path, sizeof(sh_path));
+ }
+ 
+-static inline char __user *ksud_user_path(void)
++static char __user *ksud_user_path(void)
+ {
++	static const char ksud_path[] = KSUD_PATH;
++
+ 	return userspace_stack_buffer(ksud_path, sizeof(ksud_path));
+ }
+ 
+ int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode,
+ 			 int *__unused_flags)
+ {
++	const char su[] = SU_PATH;
++
+ #ifndef CONFIG_KSU_KPROBES_HOOK
+ 	if (!ksu_sucompat_non_kp) {
+ 		return 0;
+ 	}
+ #endif
+-#ifndef CONFIG_KSU_SUSFS_SUS_SU
+- 	if (!ksu_is_allow_uid(current_uid().val)) {
+- 		return 0;
+- 	}
+-#endif
+ 
+-#ifdef CONFIG_KSU_SUSFS_SUS_SU
+-	char path[sizeof(su)] = {0};
+-#else
++	if (!ksu_is_allow_uid(current_uid().val)) {
++		return 0;
++	}
++
+ 	char path[sizeof(su) + 1];
+ 	memset(path, 0, sizeof(path));
+-#endif
+ 	ksu_strncpy_from_user_nofault(path, *filename_user, sizeof(path));
+ 
+ 	if (unlikely(!memcmp(path, su, sizeof(su)))) {
+@@ -83,25 +82,25 @@ int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode,
+ 
+ int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags)
+ {
++	// const char sh[] = SH_PATH;
++	const char su[] = SU_PATH;
++
+ #ifndef CONFIG_KSU_KPROBES_HOOK
+ 	if (!ksu_sucompat_non_kp){
+ 		return 0;
+ 	}
+ #endif
+-#ifndef CONFIG_KSU_SUSFS_SUS_SU
+- 	if (!ksu_is_allow_uid(current_uid().val)) {
+- 		return 0;
+- 	}
+-#endif
++
++	if (!ksu_is_allow_uid(current_uid().val)) {
++		return 0;
++	}
++
+ 	if (unlikely(!filename_user)) {
+ 		return 0;
+ 	}
+-#ifdef CONFIG_KSU_SUSFS_SUS_SU
+-	char path[sizeof(su)] = {0};
+-#else
++
+ 	char path[sizeof(su) + 1];
+ 	memset(path, 0, sizeof(path));
+-#endif
+ // Remove this later!! we use syscall hook, so this will never happen!!!!!
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 18, 0) && 0
+ 	// it becomes a `struct filename *` after 5.18
+@@ -168,12 +167,8 @@ int ksu_handle_execve_sucompat(int *fd, const char __user **filename_user,
+ 			       void *__never_use_argv, void *__never_use_envp,
+ 			       int *__never_use_flags)
+ {
+-	//const char su[] = SU_PATH;
+-#ifdef CONFIG_KSU_SUSFS_SUS_SU
+-	char path[sizeof(su)] = {0};
+-#else
+- 	char path[sizeof(su) + 1];
+-#endif
++	const char su[] = SU_PATH;
++	char path[sizeof(su) + 1];
+ 
+ #ifndef CONFIG_KSU_KPROBES_HOOK
+ 	if (!ksu_sucompat_non_kp) {
